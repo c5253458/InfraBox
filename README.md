@@ -37,6 +37,7 @@ Follow us on Twitter: [@Infra_Box](https://twitter.com/Infra_Box) or have look a
 ### 1.x
 - [knative](https://cloud.google.com/knative/) integration
 - Service for creating EKS K8s Clusters
+- support hardware platforms: ppc64le
 - More to come, _your idea here_
 
 ## Contribute
