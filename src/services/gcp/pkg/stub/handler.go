@@ -7,14 +7,20 @@ import (
 	b64 "encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/sap/infrabox/src/services/gcp/pkg/apis/gcp/v1alpha1"
-	"github.com/satori/go.uuid"
 	"io/ioutil"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+
+	uuid "github.com/satori/go.uuid"
+
+	"github.com/sap/infrabox/src/services/gcp/pkg/apis/gcp/v1alpha1"
+	"github.com/sap/infrabox/src/services/gcp/pkg/stub/cleaner"
+
+	goerrors "errors"
 
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/discovery/cached"
@@ -28,9 +34,9 @@ import (
 	"github.com/operator-framework/operator-sdk/pkg/util/k8sutil"
 
 	"github.com/sirupsen/logrus"
-	"k8s.io/api/core/v1"
 
 	appsv1 "k8s.io/api/apps/v1"
+	v1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -89,75 +95,106 @@ func syncGKECluster(cr *v1alpha1.GKECluster, log *logrus.Entry) (*v1alpha1.GKECl
 	}
 
 	if gkecluster == nil {
-		args := []string{"container", "clusters",
-			"create", cr.Status.ClusterName,
-			"--async",
-			"--enable-autorepair",
-            "--scopes=gke-default,storage-rw",
-			"--zone", cr.Spec.Zone,
-		}
+		// Check if we already reached the maximum number of running clusters
+		limit := os.Getenv("MAX_NUM_CLUSTERS")
+		create := true
 
-		if cr.Spec.DiskSize != 0 {
-			args = append(args, "--disk-size")
-			args = append(args, strconv.Itoa(int(cr.Spec.DiskSize)))
-		}
-
-		if cr.Spec.MachineType != "" {
-			args = append(args, "--machine-type")
-			args = append(args, cr.Spec.MachineType)
-		}
-
-		if cr.Spec.EnableNetworkPolicy {
-			args = append(args, "--enable-network-policy")
-		}
-
-		if cr.Spec.NumNodes != 0 {
-			args = append(args, "--num-nodes")
-			args = append(args, strconv.Itoa(int(cr.Spec.NumNodes)))
-		}
-
-		if cr.Spec.Preemptible {
-			args = append(args, "--preemptible")
-		}
-
-		if cr.Spec.EnableAutoscaling {
-			args = append(args, "--enable-autoscaling")
-
-			if cr.Spec.MaxNodes != 0 {
-				args = append(args, "--max-nodes")
-				args = append(args, strconv.Itoa(int(cr.Spec.MaxNodes)))
-			}
-
-			if cr.Spec.MinNodes != 0 {
-				args = append(args, "--min-nodes")
-				args = append(args, strconv.Itoa(int(cr.Spec.MinNodes)))
-			}
-		}
-
-		if cr.Spec.ClusterVersion != "" {
-			// find out the exact cluster version
-			version, err := getExactClusterVersion(cr, log)
-
-			if err != nil {
+		if limit != "" {
+			gkeclusters, err := getRemoteClusters(log)
+			if err != nil && !errors.IsNotFound(err) {
+				log.Errorf("Could not get GKE Clusters: %v", err)
 				return nil, err
 			}
 
-			args = append(args, "--cluster-version", version)
+			l, err := strconv.Atoi(limit)
+
+			if err != nil {
+				log.Errorf("Failed to parse cluster limit: %v", err)
+				return nil, err
+			}
+
+			if len(gkeclusters) >= l {
+				create = false
+			}
 		}
 
-		cmd := exec.Command("gcloud", args...)
-		out, err := cmd.CombinedOutput()
+		// Create the cluser
+		if create {
+			args := []string{"container", "clusters",
+				"create", cr.Status.ClusterName,
+				"--async",
+				"--enable-autorepair",
+				"--scopes=gke-default,storage-rw",
+				"--zone", cr.Spec.Zone,
+			}
 
-		if err != nil {
-			log.Errorf("Failed to create GKE Cluster: %v", err)
-			log.Error(string(out))
-			return nil, err
+			if cr.Spec.DiskSize != 0 {
+				args = append(args, "--disk-size")
+				args = append(args, strconv.Itoa(int(cr.Spec.DiskSize)))
+			}
+
+			if cr.Spec.MachineType != "" {
+				args = append(args, "--machine-type")
+				args = append(args, cr.Spec.MachineType)
+			}
+
+			if cr.Spec.EnableNetworkPolicy {
+				args = append(args, "--enable-network-policy")
+			}
+
+			if cr.Spec.NumNodes != 0 {
+				args = append(args, "--num-nodes")
+				args = append(args, strconv.Itoa(int(cr.Spec.NumNodes)))
+			}
+
+			if cr.Spec.Preemptible {
+				args = append(args, "--preemptible")
+			}
+
+			if cr.Spec.EnableAutoscaling {
+				args = append(args, "--enable-autoscaling")
+
+				if cr.Spec.MaxNodes != 0 {
+					args = append(args, "--max-nodes")
+					args = append(args, strconv.Itoa(int(cr.Spec.MaxNodes)))
+				}
+
+				if cr.Spec.MinNodes != 0 {
+					args = append(args, "--min-nodes")
+					args = append(args, strconv.Itoa(int(cr.Spec.MinNodes)))
+				}
+			}
+
+			if cr.Spec.ClusterVersion != "" {
+				// find out the exact cluster version
+				version, err := getExactClusterVersion(cr, log)
+
+				if err != nil {
+					return nil, err
+				}
+
+				args = append(args, "--cluster-version", version)
+			}
+
+			cmd := exec.Command("gcloud", args...)
+			out, err := cmd.CombinedOutput()
+
+			if err != nil {
+				log.Errorf("Failed to create GKE Cluster: %v", err)
+				log.Error(string(out))
+				return nil, err
+			}
+
+			status := cr.Status
+			status.Status = "pending"
+			status.Message = "Cluster is being created"
+			return &status, nil
+		} else {
+			status := cr.Status
+			status.Status = "pending"
+			status.Message = "Cluster limit reached, waiting..."
+			return &status, nil
 		}
-
-		status := cr.Status
-		status.Status = "pending"
-		status.Message = "Cluster is being created"
-		return &status, nil
 	} else {
 		if err != nil {
 			log.Errorf("Failed to create secret: %v", err)
@@ -210,6 +247,10 @@ func deleteGKECluster(cr *v1alpha1.GKECluster, log *logrus.Entry) error {
 			retrieveLogs(cr, gkecluster, log)
 		}
 
+		if err := cleanupK8s(gkecluster, log); err != nil {
+			return err
+		}
+
 		// Cluster still exists, delete it
 		cmd := exec.Command("gcloud", "-q", "container", "clusters", "delete", cr.Status.ClusterName, "--async", "--zone", cr.Spec.Zone)
 		out, err := cmd.CombinedOutput()
@@ -251,6 +292,31 @@ func deleteGKECluster(cr *v1alpha1.GKECluster, log *logrus.Entry) error {
 	err = action.Delete(cr)
 	if err != nil && !errors.IsNotFound(err) {
 		log.Errorf("Failed to delete cr: %v", err)
+		return err
+	}
+
+	return nil
+}
+
+func cleanupK8s(cluster *RemoteCluster, log *logrus.Entry) error {
+	remoteClusterSdk, err := newRemoteClusterSDK(cluster)
+	if err != nil {
+		return err
+	}
+
+	cs, err := kubernetes.NewForConfig(remoteClusterSdk.kubeConfig)
+	if err != nil {
+		log.Errorf("Failed to create clientset from given kubeconfig: %v", err)
+		return err
+	}
+
+	err = cleaner.NewK8sCleaner(cs, log).Cleanup()
+	if cleaner.IsNotYetClean(err) { // that's normal especially when triggering the cleanup for the first time
+		log.Debugf("k8s isn't clean, yet")
+		return err
+
+	} else if err != nil {
+		log.Errorf("Failed to clean up k8s cluster: %v", err)
 		return err
 	}
 
@@ -357,6 +423,28 @@ func getRemoteCluster(name string, log *logrus.Entry) (*RemoteCluster, error) {
 	return &gkeclusters[0], nil
 }
 
+func getRemoteClusters(log *logrus.Entry) ([]RemoteCluster, error) {
+	cmd := exec.Command("gcloud", "container", "clusters", "list",
+		"--format", "json")
+
+	out, err := cmd.Output()
+
+	if err != nil {
+		log.Errorf("Could not list clusters: %v", err)
+		return nil, err
+	}
+
+	var gkeclusters []RemoteCluster
+	err = json.Unmarshal(out, &gkeclusters)
+
+	if err != nil {
+		log.Errorf("Could not parse cluster list: %v", err)
+		return nil, err
+	}
+
+	return gkeclusters, nil
+}
+
 func newSecret(cluster *v1alpha1.GKECluster, gke *RemoteCluster) *v1.Secret {
 	caCrt, _ := b64.StdEncoding.DecodeString(gke.MasterAuth.ClusterCaCertificate)
 	clientKey, _ := b64.StdEncoding.DecodeString(gke.MasterAuth.ClientKey)
@@ -425,6 +513,10 @@ func doCollectorRequest(cluster *RemoteCluster, log *logrus.Entry, endpoint stri
 		return nil, err
 	}
 
+	if resp.StatusCode != 200 {
+		return &bodyText, goerrors.New(string(bodyText))
+	}
+
 	return &bodyText, nil
 }
 
@@ -457,10 +549,10 @@ func uploadToArchive(cr *v1alpha1.GKECluster, log *logrus.Entry, data *[]byte, f
 
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Authorization", "token "+job_token)
-    tr := &http.Transport{
-        TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-    }
-    client := &http.Client{Transport: tr}
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := &http.Client{Transport: tr}
 	response, err := client.Do(req)
 
 	if err != nil {
@@ -469,7 +561,10 @@ func uploadToArchive(cr *v1alpha1.GKECluster, log *logrus.Entry, data *[]byte, f
 	}
 
 	bodyText, err := ioutil.ReadAll(response.Body)
-	log.Info(string(bodyText))
+
+	if response.StatusCode != 200 {
+		return goerrors.New(string(bodyText))
+	}
 
 	return nil
 }
@@ -512,8 +607,6 @@ func retrieveLogs(cr *v1alpha1.GKECluster, cluster *RemoteCluster, log *logrus.E
 		return
 	}
 
-	log.Info(string(*data))
-
 	err = json.Unmarshal(*data, &pods)
 	if err != nil {
 		log.Errorf("Failed to collected pod list: %v", err)
@@ -530,7 +623,7 @@ func retrieveLogs(cr *v1alpha1.GKECluster, cluster *RemoteCluster, log *logrus.E
 				continue
 			}
 
-			filename := "pod_" + pod.Namespace + "_" + pod.Pod + "_" + pod.PodID + ".txt"
+			filename := "pod_" + pod.Namespace + "_" + pod.Pod + "_" + container + ".txt"
 			err = uploadToArchive(cr, log, data, filename)
 			if err != nil {
 				log.Warningf("Failed to upload log to archive: %v", err)
@@ -541,7 +634,7 @@ func retrieveLogs(cr *v1alpha1.GKECluster, cluster *RemoteCluster, log *logrus.E
 }
 
 func injectCollector(cluster *RemoteCluster, log *logrus.Entry) error {
-	client, err := newRemoteClusterSDK(cluster, log)
+	client, err := newRemoteClusterSDK(cluster)
 
 	if err != nil {
 		log.Errorf("Failed to create remote cluster client: %v", err)
@@ -569,6 +662,12 @@ func injectCollector(cluster *RemoteCluster, log *logrus.Entry) error {
 	err = client.Create(newCollectorService(), log)
 	if err != nil && !errors.IsAlreadyExists(err) {
 		log.Errorf("Failed to create collector service: %v", err)
+		return err
+	}
+
+	err = client.Create(newFluentbitConfigMap(), log)
+	if err != nil && !errors.IsAlreadyExists(err) {
+		log.Errorf("Failed to create collector fluentbit config map: %v", err)
 		return err
 	}
 
@@ -620,7 +719,7 @@ func (r *RemoteClusterSDK) Create(object types.Object, log *logrus.Entry) (err e
 	return nil
 }
 
-func newRemoteClusterSDK(cluster *RemoteCluster, log *logrus.Entry) (*RemoteClusterSDK, error) {
+func newRemoteClusterSDK(cluster *RemoteCluster) (*RemoteClusterSDK, error) {
 	caCrt, err := b64.StdEncoding.DecodeString(cluster.MasterAuth.ClusterCaCertificate)
 	clientKey, _ := b64.StdEncoding.DecodeString(cluster.MasterAuth.ClientKey)
 	clientCrt, _ := b64.StdEncoding.DecodeString(cluster.MasterAuth.ClientCertificate)
@@ -788,6 +887,59 @@ func newCollectorDeployment() *appsv1.Deployment {
 	}
 }
 
+func newFluentbitConfigMap() *v1.ConfigMap {
+	return &v1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "ConfigMap",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "infrabox-fluent-bit",
+			Namespace: "infrabox-collector",
+		},
+		Data: map[string]string{
+			"parsers.conf": `
+[PARSER]
+    Name         docker_utf8
+    Format       json
+    Time_Key     time
+    Time_Format  %Y-%m-%dT%H:%M:%S.%L
+    Time_Keep    On
+    Decode_Field_as escaped_utf8 log do_next
+    Decode_Field_as escaped      log
+`,
+			"fluent-bit.conf": `
+[SERVICE]
+    Flush        2
+    Daemon       Off
+    Log_Level    info
+    Parsers_File parsers.conf
+[INPUT]
+    Name             tail
+    Path             /var/log/containers/*.log
+    Parser           docker_utf8
+    Tag              kube.*
+    Refresh_Interval 2
+    Mem_Buf_Limit    50MB
+    Skip_Long_Lines  On
+[FILTER]
+    Name                kubernetes
+    Match               kube.*
+    Kube_URL            https://kubernetes.default.svc.cluster.local:443
+    Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
+[OUTPUT]
+    Name  http
+    Match *
+    Host infrabox-collector-api.infrabox-collector
+    Port 80
+    URI /api/log
+    Format json
+`,
+		},
+	}
+}
+
 func newCollectorDaemonSet() *appsv1.DaemonSet {
 	return &appsv1.DaemonSet{
 		TypeMeta: metav1.TypeMeta{
@@ -795,23 +947,23 @@ func newCollectorDaemonSet() *appsv1.DaemonSet {
 			APIVersion: "extensions/v1beta1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "infrabox-collector-fluentd",
+			Name:      "infrabox-collector-fluent-bit",
 			Namespace: "infrabox-collector",
 		},
 		Spec: appsv1.DaemonSetSpec{
 			Template: v1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						"app": "fluentd.collector.infrabox.net",
+						"app": "fluentbit.collector.infrabox.net",
 					},
 				},
 				Spec: v1.PodSpec{
 					Containers: []v1.Container{{
-						Name:  "fluentd",
-						Image: "quay.io/infrabox/collector-fluentd",
+						Name:  "fluent-bit",
+						Image: "fluent/fluent-bit:0.13",
 						Resources: v1.ResourceRequirements{
 							Limits: v1.ResourceList{
-								"memory": resource.MustParse("200Mi"),
+								"memory": resource.MustParse("100Mi"),
 							},
 							Requests: v1.ResourceList{
 								"cpu":    resource.MustParse("100m"),
@@ -825,10 +977,14 @@ func newCollectorDaemonSet() *appsv1.DaemonSet {
 							Name:      "varlibdockercontainers",
 							MountPath: "/var/lib/docker/containers",
 							ReadOnly:  true,
-						}},
-						Env: []v1.EnvVar{{
-							Name:  "INFRABOX_COLLECTOR_ENDPOINT",
-							Value: "http://infrabox-collector-api.infrabox-collector/api/log",
+						}, {
+							Name:      "config",
+							MountPath: "/fluent-bit/etc/parsers.conf",
+							SubPath:   "parsers.conf",
+						}, {
+							Name:      "config",
+							MountPath: "/fluent-bit/etc/fluent-bit.conf",
+							SubPath:   "fluent-bit.conf",
 						}},
 					}},
 					Volumes: []v1.Volume{{
@@ -843,6 +999,15 @@ func newCollectorDaemonSet() *appsv1.DaemonSet {
 						VolumeSource: v1.VolumeSource{
 							HostPath: &v1.HostPathVolumeSource{
 								Path: "/var/log",
+							},
+						},
+					}, {
+						Name: "config",
+						VolumeSource: v1.VolumeSource{
+							ConfigMap: &v1.ConfigMapVolumeSource{
+								LocalObjectReference: v1.LocalObjectReference{
+									Name: "infrabox-fluent-bit",
+								},
 							},
 						},
 					}},

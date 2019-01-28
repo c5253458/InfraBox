@@ -1,4 +1,4 @@
-FROM postgres:9.5.5-alpine
+FROM postgres:9.5.12-alpine
 
 COPY src/db/migrations/ /docker-entrypoint-initdb.d/
 

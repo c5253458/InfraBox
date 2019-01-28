@@ -5,6 +5,10 @@ echo "## Link cache"
 mkdir -p /infrabox/cache/node_modules
 cp -r /infrabox/cache/node_modules /dashboard
 
+echo "## npm set proxy"
+npm config set proxy ${HTTP_PROXY}
+npm config set https-proxy ${HTTPS_PROXY}
+
 cd /dashboard
 
 echo "## npm install"

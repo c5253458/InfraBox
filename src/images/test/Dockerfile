@@ -9,6 +9,11 @@ RUN    apt-get update -y \
         python-pyasn1 \
         python-crypto \
         python-ldap \
+        python-dev \
+        libffi-dev \
+        libltdl-dev \
+        libssl-dev \
+        libpq-dev \
         curl \
         git \
     && pip install \

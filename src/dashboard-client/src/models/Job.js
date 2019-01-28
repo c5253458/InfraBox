@@ -3,6 +3,9 @@ import Notification from '../models/Notification'
 import NotificationService from '../services/NotificationService'
 import NewAPIService from '../services/NewAPIService'
 import store from '../store'
+import router from '../router'
+import moment from 'moment'
+
 const Convert = require('ansi-to-html')
 
 class Section {
@@ -186,7 +189,7 @@ export default class Job {
         // Replace UTC time with local time
         idx = line.indexOf('|')
         if (idx > 0) {
-            let localTime = date.getHours() + ':' + date.getMinutes() + ':' + date.getSeconds()
+            let localTime = moment(date).format('HH:mm:ss')
             line = localTime + line.substr(idx)
         }
 
@@ -314,8 +317,8 @@ export default class Job {
         NewAPIService.openAPIUrl(url)
     }
 
-    downloadArchive (filename) {
-        const url = `projects/${this.project.id}/jobs/${this.id}/archive/download?filename=${filename}`
+    downloadArchive (filename, view = false) {
+        const url = `projects/${this.project.id}/jobs/${this.id}/archive/download?filename=${filename}&view=${view}`
         NewAPIService.openAPIUrl(url)
             .catch((err) => {
                 NotificationService.$emit('NOTIFICATION', new Notification('It seems the archived file was deleted from the server'))
@@ -346,6 +349,8 @@ export default class Job {
         return NewAPIService.get(`projects/${this.project.id}/jobs/${this.id}/restart`)
             .then((message) => {
                 NotificationService.$emit('NOTIFICATION', new Notification(message, 'done'))
+                return this.project._loadBuild(this.build.number, this.build.restartCounter)
+            }).then((build) => {
                 let a = this.name.split('.')
                 let name = a[0] + '.'
 
@@ -355,7 +360,15 @@ export default class Job {
                     name += '1'
                 }
 
-                router.push(`/project/${this.project.name}/build/${this.build.number}/${this.build.restartCounter}/job/${name}`)
+                router.push({
+                    name: 'JobDetail',
+                    params: {
+                        projectName: encodeURIComponent(this.project.name),
+                        buildNumber: this.build.number,
+                        buildRestartCounter: this.build.restartCounter,
+                        jobName: encodeURIComponent(name)
+                    }
+                })
             })
             .catch((err) => {
                 NotificationService.$emit('NOTIFICATION', new Notification(err))

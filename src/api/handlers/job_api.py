@@ -6,6 +6,7 @@ import copy
 import urllib
 import random
 from datetime import datetime
+from io import BytesIO
 
 import requests
 
@@ -434,23 +435,18 @@ class Source(Resource):
 
         return send_file(f)
 
-cache_upload_parser = api.parser()
-cache_upload_parser.add_argument('cache.tar.snappy', location='files',
-                                 type=FileStorage, required=True)
-
 
 @api.route("/api/job/cache", doc=False)
 class Cache(Resource):
 
     def get(self):
+        g.release_db()
         project_id = g.token['project']['id']
         job_name = g.token['job']['name']
-
-        template = 'project_%s_job_%s.tar.snappy'
-        key = template % (project_id, job_name)
+        filename = request.args.get('filename', None)
+        template = 'project_%s_job_%s_%s'
+        key = template % (project_id, job_name, filename)
         key = key.replace('/', '_')
-
-        g.release_db()
 
         f = storage.download_cache(key)
 
@@ -459,18 +455,19 @@ class Cache(Resource):
 
         return send_file(f)
 
-    @api.expect(cache_upload_parser)
     def post(self):
+        g.release_db()
+
         project_id = g.token['project']['id']
         job_name = g.token['job']['name']
 
-        template = 'project_%s_job_%s.tar.snappy'
-        key = template % (project_id, job_name)
-        key = key.replace('/', '_')
+        for f, _ in request.files.items():
+            template = 'project_%s_job_%s_%s'
+            key = template % (project_id, job_name, f)
+            key = key.replace('/', '_')
+            stream = request.files[f].stream
+            storage.upload_cache(stream, key)
 
-        g.release_db()
-
-        storage.upload_cache(request.files['cache.tar.snappy'].stream, key)
         return jsonify({})
 
 
@@ -479,6 +476,16 @@ class Archive(Resource):
 
     def post(self):
         job_id = g.token['job']['id']
+
+        j = g.db.execute_one_dict('''
+            SELECT id
+            FROM job
+            WHERE id = %s
+            AND (state = 'running' OR end_date > NOW() - INTERVAL '5 minutes')
+        ''', [job_id])
+
+        if not j:
+            abort(401, 'Unauthorized')
 
         for f in request.files:
             stream = request.files[f].stream
@@ -552,7 +559,8 @@ class Output(Resource):
 
             g.release_db()
 
-            storage.upload_output(stream, key)
+            if not storage.exists(key):
+                storage.upload_output(stream, key)
 
             for c in clusters:
                 stream.seek(0)
@@ -599,13 +607,42 @@ class OutputParent(Resource):
 
         key = "%s/%s" % (parent_job_id, filename)
 
-        g.release_db()
         f = storage.download_output(key)
 
+        if f:
+            g.release_db()
+            return send_file(f)
+
+        c = g.db.execute_one_dict('''
+            SELECT *
+            FROM cluster
+            WHERE name= (
+                SELECT cluster_name
+                FROM job
+                where id = %s)
+            ''', [parent_job_id])
+        g.release_db()
+
+        if c['name'] == os.environ['INFRABOX_CLUSTER_NAME']:
+            abort(404)
+
+        token = encode_job_token(job_id)
+        headers = {'Authorization': 'token ' + token}
+        url = '%s/api/job/output/%s?filename=%s' % (c['root_url'], parent_job_id, filename)
+
+        try:
+            r = requests.get(url, headers=headers, timeout=120, verify=False)
+            if r.status_code != 200:
+                f = None
+            else:
+                f = BytesIO(r.content)
+                f.seek(0)
+        except:
+            f = None
         if not f:
             abort(404)
 
-        return send_file(f)
+        return send_file(f, attachment_filename=filename)
 
 def find_leaf_jobs(jobs):
     parent_jobs = {}

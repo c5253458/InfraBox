@@ -9,6 +9,11 @@ RUN    apt-get update -y \
         python-crypto \
         python-pyasn1 \
         python-ldap \
+        python-dev \
+        libffi-dev \
+        libltdl-dev \
+        libssl-dev \
+        libpq-dev \
         libxml2-dev \
         libxmlsec1-dev \
         python-paramiko \
